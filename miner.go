@@ -81,7 +81,8 @@ func GetWorkers(clientID string, conn *redis.Client) (*map[string]string, error)
     count := int64(1)
     for {
         var keys []string
-        keys, cursor, err := conn.Scan(cursor, match, count).Result()
+        var err error
+        keys, cursor, err = conn.Scan(cursor, match, count).Result()
         if err != nil {
             fmt.Println(err)
             return nil, err
