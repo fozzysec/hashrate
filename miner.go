@@ -3,11 +3,11 @@ import "fmt"
 import "os"
 import "time"
 import "math"
+import "strings"
 import "strconv"
 import "github.com/go-redis/redis"
 
-const {
-    DB = []string{"accounts", "workers", "shares", "blocks"}
+const (
     host = "127.0.0.1"
     port = "6379"
     passwd = ""
@@ -15,12 +15,16 @@ const {
     interval = 100
     ConstBlake2B = 4295032833000
     StepBlake2B = 180
-}
+)
+
+var (
+    DB = []string{"accounts", "workers", "shares", "blocks"}
+)
 
 func main() {
     if len(os.Args[1:]) != 1 {
         fmt.Printf("Usage:\n\t%s <wallet address>\n", os.Args[0])
-        return errors.New("Error argument")
+        return
     }
     redisConn := make(map[string]*redis.Client)
     for i := 0; i < 4; i++ {
@@ -32,7 +36,7 @@ func main() {
     }
     i := 0
     for _, conn := range redisConn {
-        _, err = conn.Ping().Result()
+        _, err := conn.Ping().Result()
         if err == nil {
             i++
         }
@@ -40,46 +44,50 @@ func main() {
 
     if i != len(DB) {
         fmt.Println("Error connecting to redis.")
-        return errors.New("Error connection to redis")
+        return
     }
 
     clientID, err := redisConn["accounts"].Get(os.Args[1]).Result()
     if err == redis.Nil {
         fmt.Println("wallet address not found")
-        return errors.New("wallet address not found")
+        return
     }
     if err != nil {
         fmt.Println(err)
-        return err
+        return
     }
     workerList, err := GetWorkers(clientID, redisConn["workers"])
-
-    for workerID, workerName := range workerList {
+    workers := *workerList
+    for workerID, workerName := range workers {
         shareList, err := GetShares(clientID, workerID, redisConn["shares"])
         if err != nil {
             fmt.Println(err)
-            return err
+            return
         }
-        shareList = *shareList
+        shares := *shareList
         fmt.Printf(
             "%s:\t%s\treject:%d\n",
             workerName,
-            FormatHashrate(shareList["hashrate"].(float64)),
-            shareList["badshare"].(uint64)
-        )
+            FormatHashrate(shares["hashrate"].(float64)),
+            shares["badshare"].(uint64))
     }
 
 }
 
-func GetWorkers(clientID string, conn *redis.Client) *map[string]string, err {
+func GetWorkers(clientID string, conn *redis.Client) (*map[string]string, error) {
     workerList := make(map[string]string)
-    cursor := 0
+    var cursor uint64
     match := fmt.Sprintf("%s.*", clientID)
-    count := 100
+    count := int64(100)
     for {
+        var keys []string
         keys, cursor, err := conn.Scan(cursor, match, count).Result()
-        for key := range keys {
-            s := strings.SplitN（key, ".", -1)
+        if err != nil {
+            fmt.Println(err)
+            return nil, err
+        }
+        for _, key := range keys {
+            s := strings.SplitN(key, ".", -1)
             //workerID := strconv.ParseUint(s[1], 10, 64)
             workerID := s[1]
             workerName, err := conn.HGet(key, "worker").Result()
@@ -96,21 +104,30 @@ func GetWorkers(clientID string, conn *redis.Client) *map[string]string, err {
     return &workerList, nil
 }
 
-func GetShares(clientID string, workerID string, conn *redis.Client) *map[string]interface{}, err {
+func GetShares(clientID string, workerID string, conn *redis.Client) (*map[string]interface{}, error) {
     shareList := make(map[string]interface{})
-    cursor := 0
+    cursor := uint64(0)
     match := fmt.Sprintf("%s.%s.*", clientID, workerID)
-    count := 100
+    count := int64(100)
     currentTime := time.Now().Unix()
     var Shares uint64
     var numShares uint64
     var invalidShares uint64
     var numInvalidShares uint64
     for {
+        var keys []string
         keys, cursor, err := conn.Scan(cursor, match, count).Result()
-        for key := range keys {
+        if err != nil {
+            fmt.Println(err)
+            return nil, err
+        }
+        for _, key := range keys {
             s := strings.SplitN(key, ".", -1)
-            share_time := strconv.ParseInt(s[2], 10, 64)
+            share_time, err := strconv.ParseInt(s[2], 10, 64)
+            if err != nil {
+                fmt.Println(err)
+                return nil, err
+            }
             delay := currentTime - share_time
             if share_time <= delay {
                 continue
@@ -121,13 +138,18 @@ func GetShares(clientID string, workerID string, conn *redis.Client) *map[string
                 fmt.Println(err)
                 return nil, err
             }
-            shares, err := conn.HGet(key, "difficulty").Result()
+            sharesStr, err := conn.HGet(key, "difficulty").Result()
             if err != nil {
                 fmt.Println(err)
                 return nil, err
             }
-            validFlag = int(validFlag)
-            if validFlag == 0 {
+            shares, err := strconv.ParseUint(sharesStr, 10, 64)
+            if err != nil {
+                fmt.Println(err)
+                return nil, err
+            }
+            flag, err := strconv.ParseInt(validFlag, 10, 64)
+            if flag == 0 {
                 numInvalidShares++
                 invalidShares += shares
             }
@@ -138,8 +160,11 @@ func GetShares(clientID string, workerID string, conn *redis.Client) *map[string
             break
         }
     }
-    shareList["hashrate"] = float64(Shares) * ConstBlake2B / StepBlake2B / 1000
-    shareList["badrate"] = float64(numInvalidShares) * (Shares / numShares) * ConstBlake2B / StepBlake2B / 1000
+    var hashrate, badrate float64
+    hashrate = float64(Shares * ConstBlake2B / StepBlake2B / 1000)
+    badrate = float64(numInvalidShares * (Shares / numShares) * ConstBlake2B / StepBlake2B / 1000)
+    shareList["hashrate"] = hashrate
+    shareList["badrate"] = badrate
     shareList["badshare"] = numInvalidShares
 
     return &shareList, nil
