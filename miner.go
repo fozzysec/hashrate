@@ -14,7 +14,7 @@ const (
 
     ConstBlake2B = 4295032833000
     StepBlake2B = 180
-    DelayInterval = 100
+    DelayInterval = 300
 )
 
 var (
@@ -162,8 +162,8 @@ func GetShares(clientID string, workerID string, conn *redis.Client) (*map[strin
         }
     }
     var hashrate, badrate float64
-    hashrate = float64(Shares * ConstBlake2B / StepBlake2B / 1000)
-    badrate = float64(numInvalidShares * (Shares / numShares) * ConstBlake2B / StepBlake2B / 1000)
+    hashrate = float64(Shares * ConstBlake2B / StepBlake2B / 3000)
+    badrate = float64(numInvalidShares * (Shares / numShares) * ConstBlake2B / StepBlake2B / 3000)
     shareList["hashrate"] = hashrate
     shareList["badrate"] = badrate
     shareList["badshare"] = numInvalidShares
