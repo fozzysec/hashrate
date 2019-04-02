@@ -12,9 +12,9 @@ const (
     port = "6379"
     passwd = ""
 
-    interval = 100
     ConstBlake2B = 4295032833000
     StepBlake2B = 180
+    DelayInterval = 100
 )
 
 var (
@@ -78,7 +78,7 @@ func GetWorkers(clientID string, conn *redis.Client) (*map[string]string, error)
     workerList := make(map[string]string)
     var cursor uint64
     match := fmt.Sprintf("%s.*", clientID)
-    count := int64(100)
+    count := int64(1)
     for {
         var keys []string
         keys, cursor, err := conn.Scan(cursor, match, count).Result()
@@ -108,7 +108,7 @@ func GetShares(clientID string, workerID string, conn *redis.Client) (*map[strin
     shareList := make(map[string]interface{})
     cursor := uint64(0)
     match := fmt.Sprintf("%s.%s.*", clientID, workerID)
-    count := int64(100)
+    count := int64(1)
     currentTime := time.Now().Unix()
     var Shares uint64
     var numShares uint64
@@ -116,7 +116,8 @@ func GetShares(clientID string, workerID string, conn *redis.Client) (*map[strin
     var numInvalidShares uint64
     for {
         var keys []string
-        keys, cursor, err := conn.Scan(cursor, match, count).Result()
+        var err error
+        keys, cursor, err = conn.Scan(cursor, match, count).Result()
         if err != nil {
             fmt.Println(err)
             return nil, err
@@ -128,7 +129,7 @@ func GetShares(clientID string, workerID string, conn *redis.Client) (*map[strin
                 fmt.Println(err)
                 return nil, err
             }
-            delay := currentTime - share_time
+            delay := currentTime - DelayInterval
             if share_time <= delay {
                 continue
             }
