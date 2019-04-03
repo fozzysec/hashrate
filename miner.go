@@ -85,6 +85,7 @@ func main() {
 }
 
 func PrintHashrate(clientID string, workerList *map[string]interface{}, interval int64, conn *redis.Client) {
+    hashrateReport := make(map[string]interface{})
     for workerID, workerRecord := range *workerList {
         shareList, err := GetShares(clientID, workerID, interval, conn)
         if err != nil {
@@ -92,11 +93,29 @@ func PrintHashrate(clientID string, workerList *map[string]interface{}, interval
             return
         }
         shares := *shareList
-        fmt.Printf(
-            "%s:\t%s\treject:%d\n",
-            workerRecord.(map[string]interface{})["name"].(string),
-            FormatHashrate(shares["hashrate"].(float64)),
-            shares["badshare"].(uint64))
+        workerName := workerRecord.(map[string]interface{})["name"].(string)
+        if oldRecord, exist := hashrateReport[workerName]; exist {
+            hashrateRecord := make(map[string]interface{})
+            hashrateRecord["id"] = append(oldRecord.(map[string]interface{})["id"].([]string), workerID)
+            hashrateRecord["hashrate"] = oldRecord.(map[string]interface{})["hashrate"].(float64) + shares["hashrate"].(float64)
+            hashrateRecord["badshare"] = oldRecord.(map[string]interface{})["badshare"].(uint64) + shares["badshare"].(uint64)
+            hashrateReport[workerName] = hashrateRecord
+        } else {
+            hashrateRecord := make(map[string]interface{})
+            hashrateRecord["id"] = []string{workerID}
+            hashrateRecord["hashrate"] = shares["hashrate"].(float64)
+            hashrateRecord["badshare"] = shares["badshare"].(uint64)
+            hashrateReport[workerName] = hashrateRecord
+        }
+    }
+    for workerName, hashRecord := range hashrateReport {
+    fmt.Printf(
+        "%s:\t%s\treject:%d\tid: %s\n",
+        workerName,
+        FormatHashrate(hashRecord.(map[string]interface{})["hashrate"].(float64)),
+        hashRecord.(map[string]interface{})["badshare"].(uint64),
+        hashRecord.(map[string]interface{})["id"].([]string))
+
     }
 }
 
@@ -191,11 +210,12 @@ func GetShares(clientID string, workerID string, interval int64, conn *redis.Cli
             break
         }
     }
-    var hashrate, badrate float64
+    //var hashrate, badrate float64
+    var hashrate float64
     hashrate = Shares * ConstBlake2B / float64(interval) / 1000
-    badrate = float64(numInvalidShares) * (Shares / float64(numShares)) * ConstBlake2B / float64(interval) / 1000
+    //badrate = float64(numInvalidShares) * (Shares / float64(numShares)) * ConstBlake2B / float64(interval) / 1000
     shareList["hashrate"] = hashrate
-    shareList["badrate"] = badrate
+    //shareList["badrate"] = badrate
     shareList["badshare"] = numInvalidShares
 
     return &shareList, nil
