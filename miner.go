@@ -58,30 +58,60 @@ func main() {
         return
     }
     workerList, err := GetWorkers(clientID, redisConn["workers"])
-    workers := *workerList
-
-    for _, workerRecord := range workers {
-        ttl := workerRecord.(map[string]interface{})["ttl"].(time.Duration)
-        if ttl < 0 {
-            fmt.Printf("worker: %s online\n", workerRecord.(map[string]interface{})["name"].(string))
-        } else {
-            tAgo := redisExpireTime - ttl
-            fmt.Printf("worker: %s %.0fHour%.0fMin%.0fSec Ago\n", workerRecord.(map[string]interface{})["name"].(string), math.Floor(tAgo.Hours()), math.Floor(tAgo.Minutes() - 60 * math.Floor(tAgo.Hours())), math.Floor(tAgo.Seconds() - 60 * math.Floor(tAgo.Minutes())))
-        }
-
+    if len(*workerList) == 0 {
+        fmt.Println("no workers")
+        return
     }
+    PrintOnlineStatus(clientID, workerList)
+    fmt.Println("")
 
     fmt.Println("5 minutes:")
     PrintHashrate(clientID, workerList, 300, redisConn["shares"])
+    fmt.Println("")
 
     fmt.Println("15 minutes:")
     PrintHashrate(clientID, workerList, 900, redisConn["shares"])
+    fmt.Println("")
 
     fmt.Println("30 minutes:")
     PrintHashrate(clientID, workerList, 1800, redisConn["shares"])
+    fmt.Println("")
 
     fmt.Println("1 hour:")
     PrintHashrate(clientID, workerList, 3600, redisConn["shares"])
+}
+
+func PrintOnlineStatus(clientID string, workerList *map[string]interface{}) {
+    onlineStatusReport := make(map[string]string)
+    var tAgo time.Duration
+    for _, workerRecord := range *workerList {
+        ttl := workerRecord.(map[string]interface{})["ttl"].(time.Duration)
+        workerName := workerRecord.(map[string]interface{})["name"].(string)
+        tAgo = redisExpireTime - ttl
+        statusStr := fmt.Sprintf(
+            "%.0fHour%.0fMin%.0fSec Ago",
+            math.Floor(tAgo.Hours()),
+            math.Floor(tAgo.Minutes() - 60 * math.Floor(tAgo.Hours())),
+            math.Floor(tAgo.Seconds() - 60 * math.Floor(tAgo.Minutes())))
+        if ttl < 0 {
+            onlineStatusReport[workerName] = "online"
+        } else { //ttl >= 0, worker offline
+            //key already setup
+            if key, exist := onlineStatusReport[workerName]; exist {
+                if strings.Compare(key, "online") == 0 {
+                    continue
+                }
+                if strings.Compare(statusStr, key) < 0 {
+                    onlineStatusReport[workerName] = statusStr
+                }
+            } else {//key not setup yet
+                onlineStatusReport[workerName] = statusStr
+            }
+        }
+    }
+    for workerName, status := range onlineStatusReport {
+        fmt.Printf("%s:\t\t%s\n", workerName, status)
+    }
 }
 
 func PrintHashrate(clientID string, workerList *map[string]interface{}, interval int64, conn *redis.Client) {
@@ -109,13 +139,17 @@ func PrintHashrate(clientID string, workerList *map[string]interface{}, interval
         }
     }
     for workerName, hashRecord := range hashrateReport {
-    fmt.Printf(
+    /*fmt.Printf(
         "%s:\t%s\treject:%d\tid: %s\n",
         workerName,
         FormatHashrate(hashRecord.(map[string]interface{})["hashrate"].(float64)),
         hashRecord.(map[string]interface{})["badshare"].(uint64),
-        hashRecord.(map[string]interface{})["id"].([]string))
-
+        hashRecord.(map[string]interface{})["id"].([]string))*/
+    fmt.Printf(
+        "%s:\t%s\treject:%d\n",
+        workerName,
+        FormatHashrate(hashRecord.(map[string]interface{})["hashrate"].(float64)),
+        hashRecord.(map[string]interface{})["badshare"].(uint64))
     }
 }
 
