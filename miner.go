@@ -1,11 +1,21 @@
 package main
-import "fmt"
-import "os"
-import "time"
-import "math"
-import "strings"
-import "strconv"
-import "github.com/go-redis/redis"
+import (
+    "io"
+    "os"
+    "fmt"
+    "time"
+    "math"
+    "strings"
+    "strconv"
+    "errors"
+
+    /*"net"
+    "net/http"
+    "net/http/fcgi"*/
+
+    "github.com/go-redis/redis"
+    //"github.com/gorilla/mux"
+)
 
 const (
     host = "127.0.0.1"
@@ -17,6 +27,19 @@ const (
     Interval = 300
 )
 
+type HashReader struct {
+    redisConn   map[string]*redis.Client
+}
+
+type ClientReader struct {
+    w           io.Writer
+    clientID    string
+
+    hr          *HashReader
+    redisConn   *map[string]*redis.Client
+    workerList  *map[string]interface{}
+}
+
 var (
     DB = []string{"accounts", "workers", "shares", "blocks"}
     redisExpireTime = 48 * 60 * 60 * time.Second
@@ -27,36 +50,7 @@ func main() {
         fmt.Printf("Usage:\n\t%s <wallet address>\n", os.Args[0])
         return
     }
-    redisConn := make(map[string]*redis.Client)
-    for i := 0; i < 4; i++ {
-        redisConn[DB[i]] = redis.NewClient(&redis.Options{
-            Addr:       fmt.Sprintf("%s:%s", host, port),
-            Password:   passwd,
-            DB:         i,
-        })
-    }
-    i := 0
-    for _, conn := range redisConn {
-        _, err := conn.Ping().Result()
-        if err == nil {
-            i++
-        }
-    }
-
-    if i != len(DB) {
-        fmt.Println("Error connecting to redis.")
-        return
-    }
-
-    clientID, err := redisConn["accounts"].Get(os.Args[1]).Result()
-    if err == redis.Nil {
-        fmt.Println("wallet address not found")
-        return
-    }
-    if err != nil {
-        fmt.Println(err)
-        return
-    }
+    /*
     workerList, err := GetWorkers(clientID, redisConn["workers"])
     if len(*workerList) == 0 {
         fmt.Println("no workers")
@@ -79,12 +73,67 @@ func main() {
 
     fmt.Println("1 hour:")
     PrintHashrate(clientID, workerList, 3600, redisConn["shares"])
+    */
 }
 
-func PrintOnlineStatus(clientID string, workerList *map[string]interface{}) {
+func (hr *HashrateReader) SetupRedisConn(tables []string, host string, port int, passwd string) error {
+    redisConn := make(map[string]*redis.Client)
+    for i := 0; i < len(tables); i++ {
+        redisConn[tables[i]] = redis.NewClient(&redis.Options{
+            Addr:       fmt.Sprintf("%s:%d", host, port),
+            Password:   passwd,
+            DB:         i,
+        })
+    }
+    i := 0
+    for _, conn := range redisConn {
+        _, err := conn.Ping().Result()
+        if err == nil {
+            i++
+        }
+    }
+
+    if i != len(tables) {
+        fmt.Println("Error connecting to redis.")
+        return errors.New("Error connecting to redis.")
+    }
+
+    hr.redisConn = redisConn
+    return nil
+}
+
+func (hr *HashrateReader) GetRedisConn() *map[string]*redis.Client {
+    return &hr.redisConn
+}
+
+func (cr *ClientReader) Setup(hr *HashReader, writer io.Writer) {
+    cr.redisConn = hr.GetRedisConn()
+    cr.hr = hr
+    cr.w = writer
+}
+
+func (cr *ClientReader) SetupWallet(wallet string) error {
+    clientID, err := redisConn["accounts"].Get(wallet).Result()
+    if err == redis.Nil {
+        io.WriteString(cr.w, fmt.Sprintln("wallet address not found"))
+        return errors.New("Wallet address not found")
+    }
+    if err != nil {
+        io.WriteString(cr.w, fmt.Sprintln(err))
+        return err
+    }
+
+    cr.clientID = clientID
+    return nil
+}
+
+func (cr *ClientReader) PrintOnlineStatus() {
+    if cr.workerList == nil {
+        cr.GetWorkers()
+    }
     onlineStatusReport := make(map[string]string)
     var tAgo time.Duration
-    for _, workerRecord := range *workerList {
+    for _, workerRecord := range *cr.workerList {
         ttl := workerRecord.(map[string]interface{})["ttl"].(time.Duration)
         workerName := workerRecord.(map[string]interface{})["name"].(string)
         tAgo = redisExpireTime - ttl
@@ -110,16 +159,22 @@ func PrintOnlineStatus(clientID string, workerList *map[string]interface{}) {
         }
     }
     for workerName, status := range onlineStatusReport {
-        fmt.Printf("%s:\t\t%s\n", workerName, status)
+        io.WriteString(cr.w, fmt.Sprintf("%s:\t\t%s\n", workerName, status))
     }
 }
 
-func PrintHashrate(clientID string, workerList *map[string]interface{}, interval int64, conn *redis.Client) {
-    hashrateReport := make(map[string]interface{})
-    for workerID, workerRecord := range *workerList {
-        shareList, err := GetShares(clientID, workerID, interval, conn)
+func (cr *ClientReader) PrintHashrate(interval int64) {
+    if cr.workerList == nil {
+        err := cr.GetWorkers()
         if err != nil {
-            fmt.Println(err)
+            io.WriteString(cr.w, fmt.Sprintln(err))
+        }
+    }
+    hashrateReport := make(map[string]interface{})
+    for workerID, workerRecord := range *cr.workerList {
+        shareList, err := GetShares(workerID, interval)
+        if err != nil {
+            io.WriteString(cr.w, fmt.Sprintln(err))
             return
         }
         shares := *shareList
@@ -145,34 +200,41 @@ func PrintHashrate(clientID string, workerList *map[string]interface{}, interval
         FormatHashrate(hashRecord.(map[string]interface{})["hashrate"].(float64)),
         hashRecord.(map[string]interface{})["badshare"].(uint64),
         hashRecord.(map[string]interface{})["id"].([]string))*/
-    fmt.Printf(
-        "%s:\t%s\treject:%d\n",
-        workerName,
-        FormatHashrate(hashRecord.(map[string]interface{})["hashrate"].(float64)),
-        hashRecord.(map[string]interface{})["badshare"].(uint64))
+    io.WriteString(
+        cr.w,
+        fmt.Sprintf(
+            "%s:\t%s\treject:%d\n",
+            workerName,
+            FormatHashrate(hashRecord.(map[string]interface{})["hashrate"].(float64)),
+            hashRecord.(map[string]interface{})["badshare"].(uint64)))
     }
 }
 
-func GetWorkers(clientID string, conn *redis.Client) (*map[string]interface{}, error) {
+func (cr *ClientReader) GetWorkers() error {
+    if len(cr.clientID) == 0 {
+        io.WriteString(cr.w, fmt.Sprintln("empty clientID"))
+        return errors.New("empty clientID")
+    }
+    conn := *(cr.redisConn)["workers"]
     workerList := make(map[string]interface{})
     var cursor uint64
-    match := fmt.Sprintf("%s.*", clientID)
+    match := fmt.Sprintf("%s.*", cr.clientID)
     count := int64(10)
     for {
         var keys []string
         var err error
         keys, cursor, err = conn.Scan(cursor, match, count).Result()
         if err != nil {
-            fmt.Println(err)
-            return nil, err
+            io.WriteString(cr.w, fmt.Sprintln(err))
+            return err
         }
         for _, key := range keys {
             s := strings.SplitN(key, ".", -1)
             workerID := s[1]
             workerName, err := conn.HGet(key, "worker").Result()
             if err != nil {
-                fmt.Println(err)
-                return nil, err
+                io.WriteString(cr.w, fmt.Sprintln(err))
+                return err
             }
             workerRecord := make(map[string]interface{})
             workerRecord["name"] = workerName
@@ -183,13 +245,15 @@ func GetWorkers(clientID string, conn *redis.Client) (*map[string]interface{}, e
             break
         }
     }
-    return &workerList, nil
+    cr.workerList = &workerList
+    return nil
 }
 
-func GetShares(clientID string, workerID string, interval int64, conn *redis.Client) (*map[string]interface{}, error) {
+func (cr *ClientReader) GetShares(workerID string, interval int64) (*map[string]interface{}, error) {
+    conn := *(cr.redisConn)["shares"]
     shareList := make(map[string]interface{})
     cursor := uint64(0)
-    match := fmt.Sprintf("%s.%s.*", clientID, workerID)
+    match := fmt.Sprintf("%s.%s.*", cr.clientID, workerID)
     count := int64(1000)
     currentTime := time.Now().Unix()
     var Shares float64
@@ -201,14 +265,14 @@ func GetShares(clientID string, workerID string, interval int64, conn *redis.Cli
         var err error
         keys, cursor, err = conn.Scan(cursor, match, count).Result()
         if err != nil {
-            fmt.Println(err)
+            //fmt.Println(err)
             return nil, err
         }
         for _, key := range keys {
             s := strings.SplitN(key, ".", -1)
             share_time, err := strconv.ParseInt(s[2], 10, 64)
             if err != nil {
-                fmt.Println(err)
+                //fmt.Println(err)
                 return nil, err
             }
             startTime := currentTime - interval - UpdateDelay
@@ -219,17 +283,17 @@ func GetShares(clientID string, workerID string, interval int64, conn *redis.Cli
 
             validFlag, err := conn.HGet(key, "valid").Result()
             if err != nil {
-                fmt.Println(err)
+                //fmt.Println(err)
                 return nil, err
             }
             sharesStr, err := conn.HGet(key, "difficulty").Result()
             if err != nil {
-                fmt.Println(err)
+                //fmt.Println(err)
                 return nil, err
             }
             shares, err := strconv.ParseUint(sharesStr, 10, 64)
             if err != nil {
-                fmt.Println(err)
+                //fmt.Println(err)
                 return nil, err
             }
             flag, err := strconv.ParseInt(validFlag, 10, 64)
@@ -255,7 +319,7 @@ func GetShares(clientID string, workerID string, interval int64, conn *redis.Cli
     return &shareList, nil
 }
 
-func FormatHashrate(h float64) string {
+func (cr *ClientReader) FormatHashrate(h float64) string {
     var result string
     if h >= math.Pow(1000, 5) {
         result = fmt.Sprintf("%.2fP", h / math.Pow(1000, 5))
