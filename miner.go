@@ -8,16 +8,15 @@ import "strconv"
 import "github.com/go-redis/redis"
 
 const (
-    host = "127.0.0.1"
-    port = "6379"
     passwd = ""
-
     ConstBlake2B = 4295032833000
     UpdateDelay = 35
     Interval = 300
 )
 
 var (
+    redis_host = []string{"127.0.0.1"}
+    redis_port = []string{"6379", "6380", "6381", "6382",}
     DB = []string{"accounts", "workers", "shares", "blocks"}
     redisExpireTime = 48 * 60 * 60 * time.Second
 )
@@ -27,12 +26,15 @@ func main() {
         fmt.Printf("Usage:\n\t%s <wallet address>\n", os.Args[0])
         return
     }
-    redisConn := make(map[string]*redis.Client)
+    redisConn := make(map[string]*redis.ClusterClient)
     for i := 0; i < 4; i++ {
-        redisConn[DB[i]] = redis.NewClient(&redis.Options{
-            Addr:       fmt.Sprintf("%s:%s", host, port),
+        hosts := []string{}
+        for _, host := range redis_host {
+            hosts = append(hosts, fmt.Sprintf("%s:%s", host, redis_port[i]))
+        }
+        redisConn[DB[i]] = redis.NewClusterClient(&redis.ClusterOptions{
+            Addrs:      hosts,
             Password:   passwd,
-            DB:         i,
         })
     }
     i := 0
@@ -114,7 +116,7 @@ func PrintOnlineStatus(clientID string, workerList *map[string]interface{}) {
     }
 }
 
-func PrintHashrate(clientID string, workerList *map[string]interface{}, interval int64, conn *redis.Client) {
+func PrintHashrate(clientID string, workerList *map[string]interface{}, interval int64, conn *redis.ClusterClient) {
     hashrateReport := make(map[string]interface{})
     for workerID, workerRecord := range *workerList {
         shareList, err := GetShares(clientID, workerID, interval, conn)
@@ -153,7 +155,7 @@ func PrintHashrate(clientID string, workerList *map[string]interface{}, interval
     }
 }
 
-func GetWorkers(clientID string, conn *redis.Client) (*map[string]interface{}, error) {
+func GetWorkers(clientID string, conn *redis.ClusterClient) (*map[string]interface{}, error) {
     workerList := make(map[string]interface{})
     var cursor uint64
     match := fmt.Sprintf("%s.*", clientID)
@@ -186,7 +188,7 @@ func GetWorkers(clientID string, conn *redis.Client) (*map[string]interface{}, e
     return &workerList, nil
 }
 
-func GetShares(clientID string, workerID string, interval int64, conn *redis.Client) (*map[string]interface{}, error) {
+func GetShares(clientID string, workerID string, interval int64, conn *redis.ClusterClient) (*map[string]interface{}, error) {
     shareList := make(map[string]interface{})
     cursor := uint64(0)
     match := fmt.Sprintf("%s.%s.*", clientID, workerID)
