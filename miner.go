@@ -206,7 +206,7 @@ func GetShares(clientID string, workerID string, interval int64, conn *redis.Cli
         }
         for _, key := range keys {
             s := strings.SplitN(key, ".", -1)
-            share_time, err := strconv.ParseInt(s[2], 10, 64)
+            share_time, err := strconv.ParseInt(s[3], 10, 64)
             if err != nil {
                 fmt.Println(err)
                 return nil, err
