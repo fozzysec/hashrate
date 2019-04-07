@@ -1,0 +1,16 @@
+{
+    "hosts":    ["127.0.0.1"],
+    "ports":    [6379, 6380, 6381, 6382],
+    "tables":   ["accounts", "workers", "shares", "blocks"],
+    "passwd":   "",
+    "server":   "IntrePid Test Server/1.0.0",
+    "expire":   172800,
+    "blake2b":  4295032833000,
+    "delay":    35,
+    "periods":  [300, 900, 1800, 3600, 86400],
+    "listenaddr":   ":8080",
+    "path":         "/hashrate",
+    "method":       "POST",
+    "timeout":      30,
+    "maxheaderbytes": 20
+}
