@@ -12,5 +12,6 @@
     "path":         "/hashrate",
     "method":       "POST",
     "timeout":      30,
-    "maxheaderbytes": 20
+    "maxheaderbytes": 20,
+    "logfile":      "hashrate.log"
 }

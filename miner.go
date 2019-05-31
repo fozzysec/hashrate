@@ -29,6 +29,7 @@ var (
 type HashrateReader struct {
     redisConn   map[string]*redis.ClusterClient
     config      *Config
+    log         *log.Logger
 }
 
 const (
@@ -62,6 +63,7 @@ type Config struct {
     Method          string          `json:"method"`
     Timeout         uint64          `json:"timeout"`
     MaxHeaderBytes  uint            `json:"maxheaderbytes"`
+    Logfile         string          `json:"logfile"`
 }
 
 type ShareRecord struct {
@@ -79,13 +81,11 @@ func main() {
     config, err := ReadConfig(os.Args[1])
     if err != nil {
         log.Fatal(err)
-        return
     }
     hr = &HashrateReader{}
-    err = hr.SetupRedisConn(config)
+    err = hr.Setup(config)
     if err != nil {
-        fmt.Println(err)
-        return
+        log.Fatal(err)
     }
     defer hr.CloseRedisConn()
     r := mux.NewRouter()
@@ -97,8 +97,8 @@ func main() {
         WriteTimeout:   time.Duration(config.Timeout) * time.Second,
         MaxHeaderBytes: 1 << config.MaxHeaderBytes,
     }
-    fmt.Println("Start listen on "+config.ListenAddr)
-    log.Fatal(srv.ListenAndServe())
+    hr.log.Println("Start listen on "+config.ListenAddr)
+    hr.log.Println(srv.ListenAndServe())
 }
 
 func ReadConfig(file string) (*Config, error) {
@@ -165,7 +165,7 @@ func HashrateHandler(w http.ResponseWriter, r *http.Request) {
     w.Write(b)
 }
 
-func (hr *HashrateReader) SetupRedisConn(config *Config) error {
+func (hr *HashrateReader) Setup(config *Config) error {
     hr.config = config
     redisConn := make(map[string]*redis.ClusterClient)
     for i := 0; i < len(hr.config.Tables); i++ {
@@ -187,11 +187,15 @@ func (hr *HashrateReader) SetupRedisConn(config *Config) error {
     }
 
     if i != len(hr.config.Tables) {
-        fmt.Println("Error connecting to redis.")
         return errors.New("Error connecting to redis.")
     }
 
     hr.redisConn = redisConn
+    logfile, err := os.Create(config.Logfile)
+    if err != nil {
+        return err
+    }
+    hr.log = log.New(logfile, "HashrateService: ", log.Ldate|log.Ltime|log.Lshortfile)
     return nil
 }
 
@@ -214,9 +218,11 @@ func (cr *ClientReader) Setup(hr *HashrateReader, writer io.Writer) {
 func (cr *ClientReader) SetupWallet(wallet string) error {
     clientID, err := (*cr.redisConn)["accounts"].Get(wallet).Result()
     if err == redis.Nil {
+        cr.hr.log.Println(errWalletNotFound)
         return errWalletNotFound
     }
     if err != nil {
+        cr.hr.log.Println(err)
         return err
     }
 
@@ -228,6 +234,7 @@ func (cr *ClientReader) GetOnlineStatus() (*map[string]interface{}, error) {
     if cr.workerList == nil {
         err := cr.GetWorkers()
         if err != nil {
+            cr.hr.log.Println(err)
             return nil, err
         }
     }
@@ -273,7 +280,7 @@ func (cr *ClientReader) GetHashrate(periods []int64) (*map[string]interface{}, e
     if cr.workerList == nil {
         err := cr.GetWorkers()
         if err != nil {
-            io.WriteString(cr.w, fmt.Sprintln(err))
+            cr.hr.log.Println(err)
             return nil, err
         }
     }
@@ -282,7 +289,7 @@ func (cr *ClientReader) GetHashrate(periods []int64) (*map[string]interface{}, e
         shareList, err := cr.GetShares(workerID, periods)
         //fmt.Printf("GetShares for worker %s done, %s\n", workerID, *shareList)
         if err != nil {
-            io.WriteString(cr.w, fmt.Sprintln(err))
+            cr.hr.log.Println(err)
             return nil, err
         }
         shares := *shareList
@@ -326,7 +333,7 @@ func (cr *ClientReader) GetHashrate(periods []int64) (*map[string]interface{}, e
 
 func (cr *ClientReader) GetWorkers() error {
     if len(cr.clientID) == 0 {
-        io.WriteString(cr.w, fmt.Sprintln("empty clientID"))
+        cr.hr.log.Println("empty clientID")
         return errors.New("empty clientID")
     }
     conn := (*cr.redisConn)["workers"]
@@ -339,7 +346,7 @@ func (cr *ClientReader) GetWorkers() error {
         var err error
         keys, cursor, err = conn.Scan(cursor, match, count).Result()
         if err != nil {
-            io.WriteString(cr.w, fmt.Sprintln(err))
+            cr.hr.log.Println(err)
             return err
         }
         for _, key := range keys {
@@ -347,7 +354,7 @@ func (cr *ClientReader) GetWorkers() error {
             workerID := s[1]
             workerName, err := conn.HGet(key, "worker").Result()
             if err != nil {
-                io.WriteString(cr.w, fmt.Sprintln(err))
+                cr.hr.log.Println(err)
                 return err
             }
             workerRecord := make(map[string]interface{})
@@ -376,14 +383,14 @@ func (cr *ClientReader) GetShares(workerID string, periods []int64) (*map[int64]
         var err error
         keys, cursor, err = conn.Scan(cursor, match, count).Result()
         if err != nil {
-            fmt.Println(err)
+            cr.hr.log.Println(err)
             return nil, err
         }
         for _, key := range keys {
             s := strings.SplitN(key, ".", -1)
             share_time, err := strconv.ParseInt(s[3], 10, 64)
             if err != nil {
-                fmt.Println(err)
+                cr.hr.log.Println(err)
                 return nil, err
             }
             for i, interval := range periods {
@@ -395,17 +402,17 @@ func (cr *ClientReader) GetShares(workerID string, periods []int64) (*map[int64]
 
                 validFlag, err := conn.HGet(key, "valid").Result()
                 if err != nil {
-                    fmt.Println(err)
+                    cr.hr.log.Println(err)
                     return nil, err
                 }
                 sharesStr, err := conn.HGet(key, "difficulty").Result()
                 if err != nil {
-                    fmt.Println(err)
+                    cr.hr.log.Println(err)
                     return nil, err
                 }
                 shares, err := strconv.ParseUint(sharesStr, 10, 64)
                 if err != nil {
-                    fmt.Println(err)
+                    cr.hr.log.Println(err)
                     return nil, err
                 }
                 flag, err := strconv.ParseInt(validFlag, 10, 64)
