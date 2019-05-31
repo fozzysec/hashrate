@@ -96,6 +96,7 @@ func main() {
         ReadTimeout:    time.Duration(config.Timeout) * time.Second,
         WriteTimeout:   time.Duration(config.Timeout) * time.Second,
         MaxHeaderBytes: 1 << config.MaxHeaderBytes,
+        ErrorLog:       hr.log,
     }
     hr.log.Println("Start listen on "+config.ListenAddr)
     hr.log.Println(srv.ListenAndServe())
@@ -115,6 +116,7 @@ func ReadConfig(file string) (*Config, error) {
 }
 
 func HashrateHandler(w http.ResponseWriter, r *http.Request) {
+    hr.log.Println("Request from "+r.RemoteAddr)
     w.Header().Set("Server", hr.config.Server)
     cr := &ClientReader{}
     cr.Setup(hr, w)
