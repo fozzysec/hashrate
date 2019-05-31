@@ -21,12 +21,22 @@ import (
 
 var (
     hr *HashrateReader
+    errNoWorker = errors.New("No worker")
+    errNoWallet = errors.New("No wallet address")
+    errWalletNotFound = errors.New("Wallet address not found")
 )
 
 type HashrateReader struct {
     redisConn   map[string]*redis.ClusterClient
     config      *Config
 }
+
+const (
+    ErrcodeNoWorker = 1
+    ErrcodeNoWallet = 2
+    ErrcodeWalletNotFound = 3
+    ErrcodeOthers = -1
+)
 
 type ClientReader struct {
     w           io.Writer
@@ -52,6 +62,13 @@ type Config struct {
     Method          string          `json:"method"`
     Timeout         uint64          `json:"timeout"`
     MaxHeaderBytes  uint            `json:"maxheaderbytes"`
+}
+
+type ShareRecord struct {
+    Shares              float64
+    numShares           uint64
+    InvalidShares       float64
+    numInvalidShares    uint64
 }
 
 func main() {
@@ -107,41 +124,43 @@ func HashrateHandler(w http.ResponseWriter, r *http.Request) {
 
     errcode := 0
     if len(clientName) == 0 {
-        errcode = 1
-        finalJson["error"] = errcode
-        finalJson["data"] = "no wallet address"
-        b, _ := json.Marshal(finalJson)
-        w.Write(b)
-        return
+        errcode = ErrcodeNoWallet
     }
 
     err := cr.SetupWallet(clientName)
     if err != nil {
-        io.WriteString(w, fmt.Sprintln(err))
-        return
+        if err == errWalletNotFound {
+            errcode = ErrcodeWalletNotFound
+        } else {
+            errcode = ErrcodeOthers
+        }
     }
 
     data := make(map[string]interface{})
 
     s, err := cr.GetOnlineStatus()
     if err != nil {
-        errcode--
+        if err == errNoWorker {
+            errcode = ErrcodeNoWorker
+        } else {
+            errcode = ErrcodeOthers
+        }
     } else {
         data["online_status"] = s
     }
 
-    for i, period := range hr.config.Periods {
-       s, err = cr.GetHashrate(period)
-       if err != nil {
-           errcode--
-       } else {
-           data[fmt.Sprintf("hashrate%d", i+1)] = s
-       }
+    s, err = cr.GetHashrate(cr.hr.config.Periods)
+    if err != nil {
+        errcode = ErrcodeOthers
+    } else {
+        data["hashrate"] = s
+    }
+
+    if errcode == 0 {
+        finalJson["data"] = data
     }
 
     finalJson["error"] = errcode
-    finalJson["data"] = data
-
     b, err := json.Marshal(finalJson)
     w.Write(b)
 }
@@ -195,11 +214,9 @@ func (cr *ClientReader) Setup(hr *HashrateReader, writer io.Writer) {
 func (cr *ClientReader) SetupWallet(wallet string) error {
     clientID, err := (*cr.redisConn)["accounts"].Get(wallet).Result()
     if err == redis.Nil {
-        io.WriteString(cr.w, fmt.Sprintln("wallet address not found"))
-        return errors.New("Wallet address not found")
+        return errWalletNotFound
     }
     if err != nil {
-        io.WriteString(cr.w, fmt.Sprintln(err))
         return err
     }
 
@@ -213,6 +230,10 @@ func (cr *ClientReader) GetOnlineStatus() (*map[string]interface{}, error) {
         if err != nil {
             return nil, err
         }
+    }
+
+    if cr.workerList == nil {
+        return nil, errNoWorker
     }
     onlineStatusReport := make(map[string]string)
     var tAgo time.Duration
@@ -248,7 +269,7 @@ func (cr *ClientReader) GetOnlineStatus() (*map[string]interface{}, error) {
     return &jsonObject, nil
 }
 
-func (cr *ClientReader) GetHashrate(interval int64) (*map[string]interface{}, error) {
+func (cr *ClientReader) GetHashrate(periods []int64) (*map[string]interface{}, error) {
     if cr.workerList == nil {
         err := cr.GetWorkers()
         if err != nil {
@@ -258,39 +279,49 @@ func (cr *ClientReader) GetHashrate(interval int64) (*map[string]interface{}, er
     }
     hashrateReport := make(map[string]interface{})
     for workerID, workerRecord := range *cr.workerList {
-        shareList, err := cr.GetShares(workerID, interval)
+        shareList, err := cr.GetShares(workerID, periods)
+        //fmt.Printf("GetShares for worker %s done, %s\n", workerID, *shareList)
         if err != nil {
             io.WriteString(cr.w, fmt.Sprintln(err))
             return nil, err
         }
         shares := *shareList
         workerName := workerRecord.(map[string]interface{})["name"].(string)
-        if oldRecord, exist := hashrateReport[workerName]; exist {
-            hashrateRecord := make(map[string]interface{})
-            hashrateRecord["id"] = append(oldRecord.(map[string]interface{})["id"].([]string), workerID)
-            hashrateRecord["hashrate"] = oldRecord.(map[string]interface{})["hashrate"].(float64) + shares["hashrate"].(float64)
-            hashrateRecord["shares"] = oldRecord.(map[string]interface{})["shares"].(uint64) + shares["shares"].(uint64)
-            hashrateRecord["badshare"] = oldRecord.(map[string]interface{})["badshare"].(uint64) + shares["badshare"].(uint64)
-            hashrateReport[workerName] = hashrateRecord
+        var CurrentWorkerRecord map[int64]interface{}
+        if _, exist := hashrateReport[workerName]; exist {
+            CurrentWorkerRecord = hashrateReport[workerName].(map[int64]interface{})
         } else {
+            CurrentWorkerRecord = make(map[int64]interface{})
+        }
+        for interval, ShareData := range shares {
+            //fmt.Println(ShareData)
             hashrateRecord := make(map[string]interface{})
-            hashrateRecord["id"] = []string{workerID}
-            hashrateRecord["hashrate"] = shares["hashrate"].(float64)
-            hashrateRecord["shares"] = shares["shares"].(uint64)
-            hashrateRecord["badshare"] = shares["badshare"].(uint64)
-            hashrateReport[workerName] = hashrateRecord
+            shareObj := ShareData.(map[string]interface{})
+            if oldRecordInterface, exist := CurrentWorkerRecord[interval]; exist {
+                oldRecord := oldRecordInterface.(map[string]interface{})
+                //hashrateRecord["id"] = append(oldRecord["id"].([]string), workerID)
+                hashrateRecord["hashrate"] = oldRecord["hashrate"].(float64) + shareObj["hashrate"].(float64)
+                hashrateRecord["shares"] = oldRecord["shares"].(uint64) + shareObj["shares"].(uint64)
+                hashrateRecord["badshare"] = oldRecord["badshare"].(uint64) + shareObj["badshare"].(uint64)
+                CurrentWorkerRecord[interval] = hashrateRecord
+            } else {
+                //hashrateRecord["id"] = []string{workerID}
+                hashrateRecord["hashrate"] = shareObj["hashrate"].(float64)
+                hashrateRecord["shares"] = shareObj["shares"].(uint64)
+                hashrateRecord["badshare"] = shareObj["badshare"].(uint64)
+                CurrentWorkerRecord[interval] = hashrateRecord
+            }
+        }
+        hashrateReport[workerName] = CurrentWorkerRecord
+    }
+
+    for workerName, hashrateRecords := range hashrateReport {
+        for interval, hashrateRecord := range hashrateRecords.(map[int64]interface{}) {
+            singleRecord := hashrateRecord.(map[string]interface{})
+            hashrateReport[workerName].(map[int64]interface{})[interval].(map[string]interface{})["readable"] = FormatHashrate(singleRecord["hashrate"].(float64))
         }
     }
-    jsonObject := make(map[string]interface{})
-    for workerName, hashRecord := range hashrateReport {
-        jsonObject[workerName] = []interface{}{
-            cr.FormatHashrate(hashRecord.(map[string]interface{})["hashrate"].(float64)),
-            hashRecord.(map[string]interface{})["hashrate"].(float64),
-            hashRecord.(map[string]interface{})["shares"].(uint64),
-            hashRecord.(map[string]interface{})["badshare"].(uint64),
-        }
-    }
-    return &jsonObject, nil
+    return &hashrateReport, nil
 }
 
 func (cr *ClientReader) GetWorkers() error {
@@ -332,17 +363,14 @@ func (cr *ClientReader) GetWorkers() error {
     return nil
 }
 
-func (cr *ClientReader) GetShares(workerID string, interval int64) (*map[string]interface{}, error) {
+func (cr *ClientReader) GetShares(workerID string, periods []int64) (*map[int64]interface{}, error) {
     conn := (*cr.redisConn)["shares"]
-    shareList := make(map[string]interface{})
+    shareList := make(map[int64]interface{})
     cursor := uint64(0)
     match := fmt.Sprintf("%s.%s.*", cr.clientID, workerID)
     count := int64(1000)
     currentTime := time.Now().Unix()
-    var Shares float64
-    var numShares uint64
-    var invalidShares float64
-    var numInvalidShares uint64
+    ShareData := make([]ShareRecord, len(periods), len(periods))
     for {
         var keys []string
         var err error
@@ -358,50 +386,56 @@ func (cr *ClientReader) GetShares(workerID string, interval int64) (*map[string]
                 fmt.Println(err)
                 return nil, err
             }
-            startTime := currentTime - interval - cr.hr.config.UpdateDelay
-            endTime := currentTime - cr.hr.config.UpdateDelay
-            if share_time < startTime || share_time > endTime {
-                continue
-            }
+            for i, interval := range periods {
+                startTime := currentTime - interval - cr.hr.config.UpdateDelay
+                endTime := currentTime - cr.hr.config.UpdateDelay
+                if share_time < startTime || share_time > endTime {
+                    continue
+                }
 
-            validFlag, err := conn.HGet(key, "valid").Result()
-            if err != nil {
-                fmt.Println(err)
-                return nil, err
+                validFlag, err := conn.HGet(key, "valid").Result()
+                if err != nil {
+                    fmt.Println(err)
+                    return nil, err
+                }
+                sharesStr, err := conn.HGet(key, "difficulty").Result()
+                if err != nil {
+                    fmt.Println(err)
+                    return nil, err
+                }
+                shares, err := strconv.ParseUint(sharesStr, 10, 64)
+                if err != nil {
+                    fmt.Println(err)
+                    return nil, err
+                }
+                flag, err := strconv.ParseInt(validFlag, 10, 64)
+                if flag == 0 {
+                    ShareData[i].numInvalidShares++
+                    ShareData[i].InvalidShares += float64(shares)
+                }
+                ShareData[i].numShares++
+                ShareData[i].Shares += float64(shares)
             }
-            sharesStr, err := conn.HGet(key, "difficulty").Result()
-            if err != nil {
-                fmt.Println(err)
-                return nil, err
-            }
-            shares, err := strconv.ParseUint(sharesStr, 10, 64)
-            if err != nil {
-                fmt.Println(err)
-                return nil, err
-            }
-            flag, err := strconv.ParseInt(validFlag, 10, 64)
-            if flag == 0 {
-                numInvalidShares++
-                invalidShares += float64(shares)
-            }
-            numShares++
-            Shares += float64(shares)
         }
         if cursor == 0 {
             break
         }
     }
-    //var hashrate, badrate float64
-    var hashrate float64
-    hashrate = Shares * float64(cr.hr.config.Blake2BConst) / float64(interval) / 1000
-    shareList["hashrate"] = hashrate
-    shareList["shares"] = numShares
-    shareList["badshare"] = numInvalidShares
 
+    for i, interval := range periods {
+        var hashrate float64
+        currentRecord := make(map[string]interface{})
+        hashrate = ShareData[i].Shares * float64(cr.hr.config.Blake2BConst) / float64(interval) / 1000
+        currentRecord["hashrate"] = hashrate
+        currentRecord["badrate"] = ShareData[i].InvalidShares
+        currentRecord["shares"] = ShareData[i].numShares
+        currentRecord["badshare"] = ShareData[i].numInvalidShares
+        shareList[interval] = currentRecord
+    }
     return &shareList, nil
 }
 
-func (cr *ClientReader) FormatHashrate(h float64) string {
+func FormatHashrate(h float64) string {
     var result string
     if h >= math.Pow(1000, 5) {
         result = fmt.Sprintf("%.3fP", h / math.Pow(1000, 5))
